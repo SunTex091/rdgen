@@ -466,13 +466,48 @@ jobs:
 
       - name: ui.rs icon
         if: ${{ env.iconlink_url != 'false' }}
-        continue-on-error: true
-        shell: bash
+        shell: python
+        timeout-minutes: 2
         run: |
-          cp ./src/ui.rs ./src/ui.rs.bak
-          b64=$(base64 -w0 < ./res/icon.png)
-          perl -0777 -pe "s|iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHL[A-Za-z0-9+/=]+|$b64|g" -i.bak ./src/ui.rs
-          b64=""
+          import base64
+          import re
+          from pathlib import Path
+
+          icon = Path("res/icon.png")
+          source = Path("src/ui.rs")
+
+          print("Loading custom icon...", flush=True)
+
+          data = icon.read_bytes()
+
+          if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+              raise RuntimeError("Invalid PNG icon")
+
+          encoded = base64.b64encode(data).decode("ascii")
+          content = source.read_text(encoding="utf-8")
+
+          pattern = (
+              r"iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHL"
+              r"[A-Za-z0-9+/=]+"
+          )
+
+          result, count = re.subn(
+              pattern,
+              lambda match: encoded,
+              content,
+              count=1
+          )
+
+          if count != 1:
+              raise RuntimeError("Original icon not found")
+
+          source.with_suffix(".rs.bak").write_bytes(
+              source.read_bytes()
+          )
+
+          source.write_text(result, encoding="utf-8")
+
+          print("Custom icon embedded successfully!", flush=True)
 
       - name: fix connection delay
         continue-on-error: true
