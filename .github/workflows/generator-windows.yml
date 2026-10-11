@@ -1,19 +1,7 @@
-name: Custom Windows Client Generator
-run-name: Custom Windows Client Generator
-on: 
+name: GitHub-only webcotel Support
+run-name: webcotel Support Windows Build
+on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'version to buld'
-        required: true
-        default: ''
-        type: string
-      zip_url:
-        description: 'url to zip of json'
-        required: true
-        default: ''
-        type: string
-
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -31,32 +19,26 @@ env:
   # vcpkg version: 2024.07.12
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
-  VERSION: "${{ inputs.version }}"
+  VERSION: "1.5.0"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   UPLOAD_ARTIFACT: 'true'
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
-  STATUS_URL: "${{ secrets.GENURL }}/updategh"
+  STATUS_URL: ""
 
 
 jobs:
-  setup:
-    uses: ./.github/workflows/fetch-encrypted-secrets.yml
-    with:
-      zip_url_json: ${{ inputs.zip_url }}
-
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
     with:
-      version: ${{ inputs.version }}
+      version: "1.5.0"
 
   build-RustDeskTempTopMostWindow:
-    needs: setup
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
     with:
-      rustdesk-version: ${{ inputs.version }}
+      rustdesk-version: "1.5.0"
       upload-artifact: true
       target: windows-2022
       configuration: Release
@@ -68,7 +50,7 @@ jobs:
 
   build-for-windows-flutter:
     name: Build Windows
-    needs: [build-RustDeskTempTopMostWindow, generate-bridge, setup]
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -86,44 +68,12 @@ jobs:
             }
           # - { target: aarch64-pc-windows-msvc, os: windows-2022, arch: aarch64 }
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        
-      - uses: actions/download-artifact@v4
-        with:
-          name: encrypted-secrets-zip
-
-      - name: Load Secrets
-        uses: ./.github/actions/decrypt-secrets
-        with:
-          zip_password: ${{ secrets.ZIP_PASSWORD }}
-
-      - name: Finalize and Cleanup zip/json
-        if: always() # Run even if previous steps fail
-        continue-on-error: true
-        uses: fjogeleit/http-request-action@v1
-        with:
-          url: "${{ secrets.GENURL }}/cleanzip"
-          method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
-          data: '{"uuid": "${{ env.uuid }}"}'
-
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@v6
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-      
-      - name: Set rdgen value
-        if: ${{ env.rdgen == 'true' }}
-        run: |
-          echo "STATUS_URL=${{ secrets.GENURL }}/updategh" >> $env:GITHUB_ENV
-
-      - name: Set rdgen value
-        if: ${{ env.rdgen == 'false' }}
-        run: |
-          echo "STATUS_URL=${{ env.apiServer }}/api/updategh" >> $env:GITHUB_ENV
 
       - name: Checkout source code
         if: ${{ env.VERSION != 'master' }}
@@ -139,6 +89,19 @@ jobs:
         with:
           repository: rustdesk/rustdesk
           submodules: recursive
+
+      - name: Checkout webcotel configuration from this fork
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: rdgen-config
+          persist-credentials: false
+
+      - name: Load webcotel configuration and validate branding
+        shell: pwsh
+        run: |
+          python rdgen-config/scripts/load_webcotel_config.py --config rdgen-config/config/webcotel-support.json --assets rdgen-config/config/assets
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -435,34 +398,22 @@ jobs:
           head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
         shell: bash
           
-      - name: magick stuff
-        if: ${{ env.iconlink_url != 'false' }}
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 15
-          shell: pwsh
-          command: |
-            Invoke-WebRequest -Uri ${{ env.iconlink_url }}/get_png?filename=${{ env.iconlink_file }}"&"uuid=${{ env.iconlink_uuid }} -OutFile ./res/iconx.png 
-            mv ./res/icon.ico ./res/icon.ico.bak
-            mv ./res/icon.png ./res/icon.png.bak
-            mv ./res/tray-icon.ico ./res/tray-icon.ico.bak
-            mv ./res/iconx.png ./res/icon.png
-            mv ./res/32x32.png ./res/32x32.png.bak
-            mv ./res/64x64.png ./res/64x64.png.bak
-            mv ./res/128x128.png ./res/128x128.png.bak
-            mv ./res/128x128@2x.png ./res/128x128@2x.png.bak
-            # every size Windows asks for at 100-200% scaling, so it never rescales on the fly
-            magick ./res/icon.png -define icon:auto-resize=256,128,96,64,48,40,32,24,20,16 ./res/icon.ico
-            # the tray decodes the largest entry of this file, so keep it a single 32x32 like upstream
-            # (a 256 entry here is shrunk to 16-24 px by the shell and comes out jagged)
-            magick ./res/icon.png -resize 32x32 ./res/tray-icon.ico
-            magick ./res/icon.png -resize 32x32 ./res/32x32.png
-            magick ./res/icon.png -resize 64x64 ./res/64x64.png
-            magick ./res/icon.png -resize 128x128 ./res/128x128.png
-            magick ./res/icon.png -resize 256x256 ./res/128x128@2x.png
-
+      - name: Prepare webcotel icons locally
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item "res/icon.ico" "res/icon.ico.bak"
+          Copy-Item "res/icon.png" "res/icon.png.bak"
+          Copy-Item "res/tray-icon.ico" "res/tray-icon.ico.bak"
+          Copy-Item "rdgen-config/config/assets/icon.png" "res/icon.png" -Force
+          magick "res/icon.png" -define icon:auto-resize=256,128,96,64,48,40,32,24,20,16 "res/icon.ico"
+          magick "res/icon.png" -resize 32x32 "res/tray-icon.ico"
+          magick "res/icon.png" -resize 32x32 "res/32x32.png"
+          magick "res/icon.png" -resize 64x64 "res/64x64.png"
+          magick "res/icon.png" -resize 128x128 "res/128x128.png"
+          magick "res/icon.png" -resize 256x256 "res/128x128@2x.png"
+          Write-Host "webcotel icons prepared"
 
       - name: ui.rs icon
         if: ${{ env.iconlink_url != 'false' }}
@@ -633,17 +584,16 @@ jobs:
           magick ./res/icon.png -resize 48x48 ./rustdesk/data/flutter_assets/assets/icon.png
           cp ./res/icon.ico ./rustdesk/data/flutter_assets/assets/icon.ico
 
-      - name: logo stuff
-        if: ${{ env.logolink_url != 'false' }}
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 15
-          shell: pwsh
-          continue_on_error: true
-          command: |
-            Invoke-WebRequest -Uri ${{ env.logolink_url }}/get_png?filename=${{ env.logolink_file }}"&"uuid=${{ env.logolink_uuid }} -OutFile ./rustdesk/data/flutter_assets/assets/logo.png
+      - name: Apply webcotel logo locally
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "rustdesk/data/flutter_assets/assets"
+          if (!(Test-Path $out)) { throw "Flutter assets missing" }
+          Copy-Item "rdgen-config/config/assets/logo.png" "$out/logo.png" -Force
+          # The PNG is preserved for later use. RDGen's Windows workflow does not
+          # itself contain a privacy-screen wiring step, so do not claim it is active.
+          Copy-Item "rdgen-config/config/assets/privacy.png" "$out/webcotel-privacy.png" -Force
 
       - name: find Runner.res
         # Windows: find Runner.res (compiled from ./flutter/windows/runner/Runner.rc), copy to ./Runner.res
@@ -768,37 +718,21 @@ jobs:
         run: |
           mv ./SignOutput/rustdesk.msi "./SignOutput/${{ env.filename }}.msi" || echo "rustdesk"
 
-      - name: send file to rdgen server
-        if: ${{ env.rdgen == 'true' }}
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 15
-          shell: bash
-          command: |
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.exe" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.msi" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client || true
+      - name: Check generated support EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $file = "SignOutput/${{ env.filename }}.exe"
+          if (!(Test-Path $file)) { throw "Build failed: support EXE not found: $file" }
+          $hash = Get-FileHash $file -Algorithm SHA256
+          Write-Host "EXE: $file"
+          Write-Host "SHA256: $($hash.Hash)"
 
-      - name: send file to api server
-        if: ${{ env.rdgen == 'false' }}
-        uses: nick-fields/retry@v3
+      - name: Upload support EXE to GitHub Actions artifacts
+        uses: actions/upload-artifact@v4
         with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 15
-          shell: bash
-          command: |
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.exe" ${{ env.apiServer }}/api/save_custom_client
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.msi" ${{ env.apiServer }}/api/save_custom_client || true
-
-  cleanup:
-    needs: [build-for-windows-flutter]
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    if: always()
-    steps:
-      - name: Delete secrets artifact
-        uses: geekyeggo/delete-artifact@v5
-        with:
-          name: encrypted-secrets-zip
+          name: webcotel-support-windows-${{ github.run_number }}
+          path: SignOutput/${{ env.filename }}.exe
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
